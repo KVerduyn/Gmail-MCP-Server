@@ -107,20 +107,19 @@ async function loadCredentials() {
         if (fs.existsSync(localOAuthPath)) {
             // If found in current directory, copy to config directory
             fs.copyFileSync(localOAuthPath, OAUTH_PATH);
-            console.log('OAuth keys found in current directory, copied to global config.');
+            // OAuth keys found in current directory, copied to global config.
         }
 
         if (!fs.existsSync(OAUTH_PATH)) {
-            console.error('Error: OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or', CONFIG_DIR);
-            process.exit(1);
+            // For MCP mode, return null to indicate missing credentials
+            return null;
         }
 
         const keysContent = JSON.parse(fs.readFileSync(OAUTH_PATH, 'utf8'));
         const keys = keysContent.installed || keysContent.web;
 
         if (!keys) {
-            console.error('Error: Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
-            process.exit(1);
+            throw new Error('Invalid OAuth keys file format. File should contain either "installed" or "web" credentials.');
         }
 
         const callback = process.argv[2] === 'auth' && process.argv[3] 
@@ -137,9 +136,10 @@ async function loadCredentials() {
             const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
             oauth2Client.setCredentials(credentials);
         }
+        
+        return true;
     } catch (error) {
-        console.error('Error loading credentials:', error);
-        process.exit(1);
+        throw error;
     }
 }
 
@@ -156,7 +156,10 @@ async function authenticate() {
             ],
         });
 
-        console.log('Please visit this URL to authenticate:', authUrl);
+        // Only log auth URL if we're in auth mode
+        if (process.argv[2] === 'auth') {
+            console.log('Please visit this URL to authenticate:', authUrl);
+        }
         open(authUrl);
 
         server.on('request', async (req, res) => {
@@ -320,16 +323,19 @@ const DownloadAttachmentSchema = z.object({
 
 // Main function
 async function main() {
-    await loadCredentials();
+    const credentialsLoaded = await loadCredentials();
 
     if (process.argv[2] === 'auth') {
+        if (!credentialsLoaded) {
+            throw new Error(`OAuth keys file not found. Please place gcp-oauth.keys.json in current directory or ${CONFIG_DIR}`);
+        }
         await authenticate();
         console.log('Authentication completed successfully');
         process.exit(0);
     }
 
-    // Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    // Initialize Gmail API (will be null if credentials not loaded)
+    const gmail = credentialsLoaded ? google.gmail({ version: 'v1', auth: oauth2Client }) : null;
 
     // Server implementation
     const server = new Server({
@@ -1204,6 +1210,19 @@ async function main() {
 }
 
 main().catch((error) => {
-    console.error('Server error:', error);
+    console.error('Gmail MCP Server startup error:', error.message);
+    console.error('Stack trace:', error.stack);
+    
+    // Provide helpful error messages for common issues
+    if (error.message.includes('OAuth keys file not found')) {
+        console.error('\n📋 Setup Instructions:');
+        console.error('1. Create a Google Cloud Project');
+        console.error('2. Enable Gmail API');
+        console.error('3. Create OAuth 2.0 credentials');
+        console.error('4. Download the credentials as gcp-oauth.keys.json');
+        console.error('5. Place the file in the project directory or ~/.gmail-mcp/');
+        console.error('6. Run: node dist/index.js auth');
+    }
+    
     process.exit(1);
 });
